@@ -1,8 +1,9 @@
 name: Build VoidLink IPA
 
 on:
+  workflow_dispatch:  # Manual trigger from GitHub UI
   push:
-    branches: [ "feat/frame_pacing_metal" ]
+    branches: [ "Integration" ]
 
 jobs:
   build:
@@ -11,20 +12,44 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Checkout submodules
-        run: "git submodule update --init --recursive"
+        run: git submodule update --init --recursive
 
-      - name: Build VoidLink
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Resolve Swift Package Dependencies
+        run: xcodebuild -resolvePackageDependencies -project VoidLink.xcodeproj -scheme VoidLink
+
+      - name: Build VoidLink Archive
         run: |
-          xcodebuild -verbose -scheme VoidLink -sdk iphoneos -configuration Debug archive -archivePath $PWD/build/VoidLink.xcarchive CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED="NO" CODE_SIGN_ENTITLEMENTS="" CODE_SIGNING_ALLOWED="NO"
-          mkdir -p ./build/IPA && mkdir -p ./build/IPA/Payload
-          cp -r ./build/VoidLink.xcarchive/Products/Applications/VoidLink.app ./build/IPA/Payload/VoidLink.app
-          cd ./build/IPA && zip -r ../../build/VoidLink.ipa ./Payload/* && cd ../..
+          xcodebuild \
+            -project VoidLink.xcodeproj \
+            -scheme VoidLink \
+            -sdk iphoneos \
+            -configuration Release \
+            -archivePath $PWD/build/VoidLink.xcarchive \
+            archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED="NO" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            CODE_SIGNING_ALLOWED="NO" \
+            | tail -n 50
 
-      - name: Upload VoidLink IPA to Artifacts
+      - name: Package IPA
+        run: |
+          mkdir -p ./build/IPA/Payload
+          cp -r ./build/VoidLink.xcarchive/Products/Applications/VoidLink.app ./build/IPA/Payload/VoidLink.app
+          cd ./build/IPA && zip -r ../../build/VoidLink.ipa ./Payload/*
+
+      - name: Upload VoidLink IPA
         uses: actions/upload-artifact@v4
         with:
-          name: VoidLink.ipa
+          name: VoidLink-IPA
           path: build/VoidLink.ipa
+          retention-days: 90
