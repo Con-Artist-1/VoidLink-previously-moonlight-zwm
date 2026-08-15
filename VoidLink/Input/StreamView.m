@@ -76,6 +76,7 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 
     NSDictionary<NSString *, NSNumber *> *dictCodes;
     CustomTapGestureRecognizer *keyboardToggleRecognizer;
+    CustomTapGestureRecognizer *touchModeToggleRecognizer;
     UIPanGestureRecognizer *discreteMouseWheelRecognizer;
     UIPanGestureRecognizer *continuousMouseWheelRecognizer;
 #if defined(__IPHONE_16_1) || defined(__TVOS_16_1)
@@ -85,8 +86,13 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     bool keyboardHeightDesignatedForLandscape;
     CGFloat HeightViewLiftedTo;
     UILabel* keyboardToggleTip;
+    UILabel* touchModeToggleHUD;
     
     UIKeyModifierFlags comboKeyModifierFlags;
+    
+    TouchMode profileTouchMode; // original touch mode from the game profile
+    BOOL touchModeToggledToNative; // tracks whether we toggled away from profile mode
+    OSCProfile* currentProfile; // reference to the current game profile
     
     WidgetSizeTransition _widgetSizeTransition;
     OSCProfilesManager* oscProfileMan;
@@ -150,7 +156,13 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     _pencilHandler = PencilHandler.shared;
 
     // iOS uses touch Mode depending on user preference
+    currentProfile = profile;
+    profileTouchMode = profile.touchMode;
+    touchModeToggledToNative = NO;
     [self updateTouchHandlerWithProfile:profile];
+    
+    // 4-finger tap gesture to toggle between native touch and trackpad mode
+    [self setupTouchModeToggleRecognizer];
     
     // we'll render on-screen controls on the toplayer too:
     _onScreenControls = [[OnScreenControls alloc] initWithView:self->_streamFrameTopLayerView controllerSup:controllerSupport streamConfig:streamConfig];  // don't delete, this is mandatory
@@ -271,6 +283,111 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
     keyboardToggleRecognizer.delaysTouchesEnded = NO;
     [self->_streamFrameTopLayerView addGestureRecognizer:keyboardToggleRecognizer];
     keyboardToggleRecognizer.touchCapturingView = self;
+}
+
+- (void)setupTouchModeToggleRecognizer {
+    [self->_streamFrameTopLayerView removeGestureRecognizer:touchModeToggleRecognizer];
+    touchModeToggleRecognizer = [[CustomTapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleTouchMode)];
+    touchModeToggleRecognizer.numberOfTouchesRequired = 4;
+    touchModeToggleRecognizer.tapDownTimeThreshold = 0.3;
+    touchModeToggleRecognizer.delaysTouchesBegan = NO;
+    touchModeToggleRecognizer.delaysTouchesEnded = NO;
+    [self->_streamFrameTopLayerView addGestureRecognizer:touchModeToggleRecognizer];
+    touchModeToggleRecognizer.touchCapturingView = self;
+}
+
+- (void)toggleTouchMode {
+    if (!currentProfile) return;
+    
+    // Determine the target touch mode
+    TouchMode targetMode;
+    if (touchModeToggledToNative) {
+        // Toggle back to the profile's original touch mode
+        targetMode = profileTouchMode;
+        touchModeToggledToNative = NO;
+    } else {
+        // Toggle to native touch if currently in trackpad/relative mode,
+        // or to relative touch (trackpad) if currently in native touch mode
+        if (touchMode == NativeTouch || touchMode == NativeTouchOnly) {
+            targetMode = RelativeTouch;
+        } else {
+            targetMode = NativeTouch;
+        }
+        touchModeToggledToNative = (targetMode == NativeTouch || targetMode == NativeTouchOnly);
+    }
+    
+    // Temporarily override the profile's touch mode for handler creation
+    int originalProfileTouchMode = currentProfile.touchMode;
+    currentProfile.touchMode = (int)targetMode;
+    [self updateTouchHandlerWithProfile:currentProfile];
+    currentProfile.touchMode = originalProfileTouchMode; // restore profile's stored value
+    
+    // Show HUD feedback
+    [self showTouchModeHUDForMode:targetMode];
+    
+    Log(LOG_I, @"Touch mode toggled to: %ld", (long)targetMode);
+}
+
+- (void)showTouchModeHUDForMode:(TouchMode)mode {
+    // Remove existing HUD if present
+    [touchModeToggleHUD removeFromSuperview];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideTouchModeHUD) object:nil];
+    
+    NSString* modeText;
+    switch (mode) {
+        case NativeTouch:
+        case NativeTouchOnly:
+            modeText = @"Native Touch";
+            break;
+        case RelativeTouch:
+            modeText = @"Trackpad Mode";
+            break;
+        case AbsoluteTouch:
+            modeText = @"Absolute Touch";
+            break;
+        case TouchDisabled:
+            modeText = @"Touch Disabled";
+            break;
+        default:
+            modeText = @"Unknown";
+            break;
+    }
+    
+    touchModeToggleHUD = [[UILabel alloc] init];
+    touchModeToggleHUD.text = [NSString stringWithFormat:@" %@ ", modeText];
+    touchModeToggleHUD.font = [UIFont boldSystemFontOfSize:18];
+    touchModeToggleHUD.textAlignment = NSTextAlignmentCenter;
+    touchModeToggleHUD.textColor = [UIColor whiteColor];
+    touchModeToggleHUD.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.65];
+    touchModeToggleHUD.layer.cornerRadius = 12;
+    touchModeToggleHUD.clipsToBounds = YES;
+    touchModeToggleHUD.alpha = 0.0;
+    touchModeToggleHUD.translatesAutoresizingMaskIntoConstraints = NO;
+    
+    [self addSubview:touchModeToggleHUD];
+    [NSLayoutConstraint activateConstraints:@[
+        [touchModeToggleHUD.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+        [touchModeToggleHUD.centerYAnchor constraintEqualToAnchor:self.centerYAnchor constant:-self.bounds.size.height * 0.3],
+        [touchModeToggleHUD.heightAnchor constraintEqualToConstant:44],
+        [touchModeToggleHUD.widthAnchor constraintGreaterThanOrEqualToConstant:160]
+    ]];
+    
+    // Animate in
+    [UIView animateWithDuration:0.2 animations:^{
+        self->touchModeToggleHUD.alpha = 1.0;
+    }];
+    
+    // Auto-hide after 1.2 seconds
+    [self performSelector:@selector(hideTouchModeHUD) withObject:nil afterDelay:1.2];
+}
+
+- (void)hideTouchModeHUD {
+    [UIView animateWithDuration:0.3 animations:^{
+        self->touchModeToggleHUD.alpha = 0.0;
+    } completion:^(BOOL finished) {
+        [self->touchModeToggleHUD removeFromSuperview];
+        self->touchModeToggleHUD = nil;
+    }];
 }
 
 - (void)keyboardWillShow:(NSNotification *)notification{
@@ -862,6 +979,9 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
         }
         
         [self.streamFrameVC restorePersistedStreamViewOffsetAndScaleWithProfile:profile];
+        self->currentProfile = profile;
+        self->profileTouchMode = profile.touchMode;
+        self->touchModeToggledToNative = NO;
         [self updateTouchHandlerWithProfile:profile];
         OnScreenWidgetView.profileChangedDuringStreaming = false;
     });
@@ -1816,6 +1936,10 @@ static const double X1_MOUSE_SPEED_DIVISOR = 2.5;
 - (void)cleanUp{
     [keyInputField resignFirstResponder];
     keyInputField.delegate = nil;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(hideTouchModeHUD) object:nil];
+    [touchModeToggleHUD removeFromSuperview];
+    touchModeToggleHUD = nil;
+    currentProfile = nil;
 }
 
 - (void)dealloc{
